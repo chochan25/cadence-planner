@@ -1,0 +1,23 @@
+---
+description: Planner app stack — Next.js App Router, shadcn, Convex, GPT-5.5 agent, backend patterns
+alwaysApply: true
+---
+
+# Planner project stack
+
+- **Framework**: Next.js 14+ App Router, **TypeScript**, **Tailwind CSS**.
+- **UI**: Prefer **shadcn/ui**. Add components with:
+
+  ```bash
+  npx shadcn@latest add <component>
+  ```
+
+- **Data / realtime**: **Convex** (`convex/`). Use Convex schema, queries, mutations, and actions; sync from the client with Convex React hooks/provider as elsewhere in this repo.
+
+- **Planning agent**: Use **OpenAI GPT-5.5** as the planning model wherever OpenAI is called for that flow (env + client consistent with repo).
+
+- **React**: **Never** use class components; use function components only.
+
+- **Backend in Next (non-Convex)**: Put server-only logic in **Server Actions** or **Route Handlers** under `app/api/...`. Do not put secrets in client components.
+
+- Convex remains the primary backend for persistence and subscriptions; use Next server actions / API routes for other server needs (e.g. orchestration, webhooks, thin proxies) when appropriate.
