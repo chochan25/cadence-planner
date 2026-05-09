@@ -192,7 +192,13 @@ Respond with a single JSON object (no markdown) using exactly this shape:
     return NextResponse.json({ error: message }, { status: 502 });
   }
 
-  const raw = completion.choices[0]?.message?.content ?? "";
+  const raw = completion?.choices?.[0]?.message?.content ?? "";
+  if (!raw.trim()) {
+    return NextResponse.json(
+      { error: "Model returned empty response" },
+      { status: 502 },
+    );
+  }
   let parsed: unknown;
   try {
     parsed = JSON.parse(raw);
