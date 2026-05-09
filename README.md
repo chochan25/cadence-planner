@@ -1,36 +1,169 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# Cadence — Adaptive Daily Planning
 
-## Getting Started
+> **Your day, shaped by how you actually feel.**
 
-First, run the development server:
+Most planners treat every Monday the same. Cadence adapts your schedule to how you actually feel today — based on sleep debt, energy levels, menstrual cycle phase, and accumulated feedback. It is a personal executive assistant that learns you over time.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+**Live demo:** [cadence-planner-zeta.vercel.app](https://cadence-planner-zeta.vercel.app/)
+
+---
+
+## The Problem
+
+Every productivity tool on the market assumes humans are constants. They schedule your deep work at 9 AM whether you slept eight hours or four. They ignore that your cognitive capacity fluctuates with your hormonal cycle, your training load, and your accumulated sleep debt.
+
+The research is clear:
+
+- Chronic sleep restriction below 6 hours produces cognitive deficits equivalent to 2 nights of total sleep deprivation (Van Dongen et al., 2003)
+- Circadian phenotype determines individual peak performance windows — "larks" and "owls" differ by up to 6 hours (Facer-Childs & Brandstaetter, 2015)
+- Luteal phase progesterone elevation affects working memory and emotional processing (Sundström-Poromaa & Gingnell, 2014)
+- Recovery-load balance is essential for sustained performance (Kellmann et al., 2018)
+
+Yet no planner accounts for any of this. Cadence does.
+
+---
+
+## Who It Helps
+
+| Persona | Context | How Cadence adapts |
+|---|---|---|
+| **Working Mom** | Slept 4 hrs, luteal phase, kid was sick | Pushes deep work to afternoon, adds recovery blocks, reduces task intensity |
+| **Startup Founder** | Slept 7 hrs, high energy, morning person | Front-loads hardest tasks (investor deck at 8:30 AM), schedules workout midday |
+| **Student** | Slept 3 hrs, menstrual phase, exam stress | Limits to 2-3 essential tasks, maximises rest, places study in personal peak window |
+
+Same task list. Radically different schedules. Because the planner adapts to the person, not the calendar.
+
+---
+
+## How It Works
+
+```
+User inputs state (sleep, energy, clarity, cycle phase)
+        ↓
+Few-shot examples from research papers ground the LLM
+        ↓
+OpenAI generates an adapted schedule + rationale
+        ↓
+ElevenLabs narrates WHY the day is shaped this way
+        ↓
+Convex saves the plan → system learns patterns over time
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+### The Adaptive Loop
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+1. **Day 1:** User generates a plan. System saves it.
+2. **Day 2:** User gives feedback (thumbs down on "deep work at 9 AM"). System remembers.
+3. **Day 3:** Same state → different plan. Deep work moved to 2 PM. The system adapted.
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Over time, the "What I know about you" panel builds a profile: average sleep, preferred deep-work windows, cycle patterns. The more you use it, the less you need to tell it.
 
-## Learn More
+---
 
-To learn more about Next.js, take a look at the following resources:
+## Research Grounding via Adaption Labs
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+We did not just prompt an LLM with generic instructions. We ingested 6 academic papers into **Adaption Labs'** unstructured document pipeline to generate a structured training dataset.
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+### Papers Processed
 
-## Deploy on Vercel
+| Topic | Paper |
+|---|---|
+| Adaptive interventions framework | Nahum-Shani et al. (2018) — *JITAIs in Mobile Health* |
+| Sleep debt & cognition | Van Dongen et al. (2003) — *Cumulative Cost of Additional Wakefulness* |
+| Chronotype & performance | Roenneberg et al. (2003) — *Life between Clocks* |
+| Menstrual cycle & cognition | Sundström-Poromaa & Gingnell (2014) — *Menstrual Cycle Influence on Cognitive Function* |
+| Training load & recovery | Halson (2014) — *Monitoring Training Load to Understand Fatigue* |
+| N-of-1 personalisation | Hekler et al. (2019) — *Why We Need a Small Data Paradigm* |
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+The adapted JSONL output is included in this repository at [`/data/adaption-labs-output.jsonl`](/data/adaption-labs-output.jsonl). This dataset was used to construct the few-shot examples that ground the planner's recommendations in peer-reviewed science.
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+---
+
+## Tech Stack
+
+| Layer | Tool | Purpose |
+|---|---|---|
+| Frontend | Next.js + Tailwind + shadcn/ui | Responsive UI with persona cards, sliders, timeline |
+| Backend / State | Convex | Real-time reactive database — stores plans, computes patterns, live sync |
+| Planning Engine | OpenAI (GPT-4o) | Generates adaptive schedules with structured JSON output |
+| Research Grounding | Adaption Labs | Processed academic papers into training data |
+| Voice | ElevenLabs | Text-to-speech narration of daily rationale |
+| Build Tool | Cursor (IDE + SDK) | Entire app built with Cursor Agent mode |
+| Hosting | Vercel | One-click deployment with environment variables |
+| Strategy | Manus | Product architecture, sponsor analysis, demo scripting |
+
+---
+
+## Running Locally
+
+```bash
+# Clone
+git clone https://github.com/chochan25/cadence-planner.git
+cd cadence-planner
+
+# Install
+npm install
+
+# Set up environment
+cp .env.example .env.local
+# Fill in: OPENAI_API_KEY, ELEVENLABS_API_KEY, NEXT_PUBLIC_CONVEX_URL
+
+# Start Convex (in one terminal)
+npx convex dev
+
+# Start Next.js (in another terminal)
+npm run dev
+```
+
+Open [http://localhost:3000](http://localhost:3000).
+
+---
+
+## Sponsor Tracks
+
+This project targets the following AIE Hackathon sponsor tracks:
+
+- **Adaption Labs** — Most creative use of Adaptive Data (paper ingestion → training dataset → grounded planner)
+- **Convex** — Best use of Convex (real-time plan history, pattern computation, live reactivity)
+- **Cursor** — Best use of Cursor SDK (entire app built with Cursor Agent; SDK used for calendar export)
+- **OpenAI** — Best use of OpenAI (few-shot research-grounded planning with structured JSON output)
+- **ElevenLabs** — Voice rationale feature
+
+---
+
+## Project Structure
+
+```
+cadence-planner/
+├── src/
+│   ├── app/
+│   │   ├── api/
+│   │   │   ├── plan/route.ts        # OpenAI planning endpoint
+│   │   │   ├── speak/route.ts       # ElevenLabs TTS endpoint
+│   │   │   └── export-calendar/     # .ics calendar export
+│   │   └── page.tsx                 # Main UI
+│   ├── data/
+│   │   └── few-shot-examples.ts     # Research-grounded examples
+│   └── lib/
+├── convex/
+│   ├── schema.ts                    # Database schema
+│   └── plans.ts                     # Mutations & queries
+├── data/
+│   └── adaption-labs-output.jsonl   # Raw Adaption Labs output
+└── public/
+```
+
+---
+
+## Builder
+
+**Cho Chan Myei Oo** — AI Product Manager, Manchester UK
+- GitHub: [@chochan25](https://github.com/chochan25)
+- LinkedIn: [chochanmyei](https://linkedin.com/in/chochanmyei)
+
+Built solo at the AI Engineer Hackathon, Singapore (May 2026).
+
+---
+
+## License
+
+MIT
