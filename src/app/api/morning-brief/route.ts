@@ -1,8 +1,14 @@
-import { ConvexHttpClient } from "convex/browser";
 import { NextResponse } from "next/server";
 
-import { api } from "../../../../convex/_generated/api";
-import type { Doc } from "../../../../convex/_generated/dataModel";
+import { enforceRateLimit, readJsonWithLimit } from "@/lib/api-guard";
+import { isPlanResponseBody, type PlanScheduleItem } from "@/lib/plan";
+
+type MorningBriefPlan = {
+  createdAt: number;
+  tasks: string;
+  schedule: PlanScheduleItem[];
+  rationale: string;
+};
 
 function escapeHtml(raw: string): string {
   return raw
@@ -13,7 +19,7 @@ function escapeHtml(raw: string): string {
     .replaceAll("'", "&#39;");
 }
 
-function buildMorningBriefHtml(plan: Doc<"plans">) {
+function buildMorningBriefHtml(plan: MorningBriefPlan) {
   const createdAt = new Date(plan.createdAt).toLocaleString();
   const rows = plan.schedule
     .map(
@@ -21,7 +27,7 @@ function buildMorningBriefHtml(plan: Doc<"plans">) {
   <td style="padding:10px 12px;border:1px solid #e5e7eb;font-size:14px;color:#111827;white-space:nowrap;">${escapeHtml(item.time)}</td>
   <td style="padding:10px 12px;border:1px solid #e5e7eb;font-size:14px;color:#111827;">${escapeHtml(item.task)}</td>
   <td style="padding:10px 12px;border:1px solid #e5e7eb;font-size:13px;color:#334155;text-transform:capitalize;">${escapeHtml(item.type.replaceAll("_", " "))}</td>
-  <td style="padding:10px 12px;border:1px solid #e5e7eb;font-size:13px;color:#334155;white-space:nowrap;">${escapeHtml(String(item.duration))} min</td>
+  <td style="padding:10px 12px;border:1px solid #e5e7eb;font-size:13px;color:#334155;white-space:nowrap;">${escapeHtml(item.duration)}</td>
 </tr>`,
     )
     .join("\n");
@@ -68,25 +74,32 @@ ${rows}
 </html>`;
 }
 
-export async function GET() {
-  const convexUrl =
-    process.env.NEXT_PUBLIC_CONVEX_URL ?? process.env.CONVEX_URL ?? "";
-  if (!convexUrl) {
+export async function POST(req: Request) {
+  const limited = enforceRateLimit(req, {
+    name: "morning-brief",
+    limit: 30,
+    windowMs: 10 * 60 * 1_000,
+  });
+  if (limited) return limited;
+
+  const parsed = await readJsonWithLimit(req, 32_768);
+  if (!parsed.ok) return parsed.response;
+  const body = parsed.value;
+
+  if (
+    !body ||
+    typeof body !== "object" ||
+    typeof (body as { createdAt?: unknown }).createdAt !== "number" ||
+    typeof (body as { tasks?: unknown }).tasks !== "string" ||
+    !isPlanResponseBody(body)
+  ) {
     return NextResponse.json(
-      { error: "Server is missing NEXT_PUBLIC_CONVEX_URL (or CONVEX_URL)." },
-      { status: 500 },
+      { error: "Morning brief payload is invalid." },
+      { status: 400 },
     );
   }
 
-  const client = new ConvexHttpClient(convexUrl);
-  const recentPlans = await client.query(api.plans.getRecentPlans, {});
-  const latestPlan = recentPlans[0];
-  if (!latestPlan) {
-    return NextResponse.json(
-      { error: "No saved plan found yet. Generate and save a plan first." },
-      { status: 404 },
-    );
-  }
+  const latestPlan = body as MorningBriefPlan;
 
   return NextResponse.json({
     subject: "Your Morning Brief",

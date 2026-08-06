@@ -2,6 +2,7 @@ import OpenAI from "openai";
 import { NextResponse } from "next/server";
 
 import { fewShotExamples } from "@/data/few-shot-examples";
+import { enforceRateLimit, readJsonWithLimit } from "@/lib/api-guard";
 import {
   isFeedbackItem,
   isPlanResponseBody,
@@ -26,6 +27,7 @@ type BodyInput = {
 };
 
 const MAX_FEEDBACK_ITEMS = 50;
+const MAX_TASK_CHARACTERS = 6_000;
 const PLAN_MODELS = ["gpt-4.1-mini", "gpt-4o"] as const;
 
 function formatFeedbackBlock(items: FeedbackItem[]): string {
@@ -33,7 +35,9 @@ function formatFeedbackBlock(items: FeedbackItem[]): string {
   // can latch onto the exact phrasing during in-context steering.
   const lines = items.map(
     (f) =>
-      `- User reported that "${f.task}" at ${f.time} did not work well (reason: ${f.reason}). Please adjust the schedule to avoid similar placements.`,
+      f.sentiment === "positive"
+        ? `- User reported that "${f.task}" at ${f.time} worked well. Prefer similar placements when practical.`
+        : `- User reported that "${f.task}" at ${f.time} did not work well. Avoid similar placements when practical.`,
   );
   return `Previous feedback:\n${lines.join("\n")}`;
 }
@@ -55,12 +59,16 @@ function parseBoundedInt(value: unknown, label: string) {
 }
 
 export async function POST(req: Request) {
-  let body: BodyInput;
-  try {
-    body = (await req.json()) as BodyInput;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
+  const limited = enforceRateLimit(req, {
+    name: "plan",
+    limit: 8,
+    windowMs: 10 * 60 * 1_000,
+  });
+  if (limited) return limited;
+
+  const parsedBody = await readJsonWithLimit(req, 16_384);
+  if (!parsedBody.ok) return parsedBody.response;
+  const body = parsedBody.value as BodyInput;
 
   const s = parseBoundedInt(body.sleep, "sleep");
   const e = parseBoundedInt(body.energy, "energy");
@@ -72,6 +80,12 @@ export async function POST(req: Request) {
   if (typeof body.tasks !== "string") {
     return NextResponse.json(
       { error: "tasks must be a string" },
+      { status: 400 },
+    );
+  }
+  if (body.tasks.length > MAX_TASK_CHARACTERS) {
+    return NextResponse.json(
+      { error: `tasks may include at most ${MAX_TASK_CHARACTERS} characters` },
       { status: 400 },
     );
   }
@@ -183,13 +197,11 @@ Respond with a single JSON object (no markdown) using exactly this shape:
       }
     }
   } catch (err) {
-    const message =
-      requestError instanceof Error
-        ? requestError.message
-        : err instanceof Error
-          ? err.message
-          : "OpenAI request failed";
-    return NextResponse.json({ error: message }, { status: 502 });
+    console.error("Plan generation failed", requestError ?? err);
+    return NextResponse.json(
+      { error: "Plan generation is temporarily unavailable." },
+      { status: 502 },
+    );
   }
 
   if (!completion) {

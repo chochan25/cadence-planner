@@ -1,6 +1,7 @@
 import { createEvents, type EventAttributes } from "ics";
 import { NextResponse } from "next/server";
 
+import { readJsonWithLimit } from "@/lib/api-guard";
 import { isPlanScheduleArray, type PlanScheduleItem } from "@/lib/plan";
 
 type ExportCalendarBody = {
@@ -83,12 +84,9 @@ function buildEventForToday(item: PlanScheduleItem): EventAttributes | null {
 }
 
 export async function POST(req: Request) {
-  let body: ExportCalendarBody;
-  try {
-    body = (await req.json()) as ExportCalendarBody;
-  } catch {
-    return NextResponse.json({ error: "Invalid JSON body" }, { status: 400 });
-  }
+  const parsedBody = await readJsonWithLimit(req, 32_768);
+  if (!parsedBody.ok) return parsedBody.response;
+  const body = parsedBody.value as ExportCalendarBody;
 
   if (!isPlanScheduleArray(body.schedule)) {
     return NextResponse.json(
