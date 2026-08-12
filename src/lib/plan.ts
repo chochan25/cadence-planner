@@ -10,13 +10,13 @@ export type PlanResponseBody = {
   rationale: string;
 };
 
-export type FeedbackReason = "not_suitable";
+export type FeedbackSentiment = "positive" | "negative";
 
 export type FeedbackItem = {
   task: string;
   time: string;
   type: string;
-  reason: FeedbackReason;
+  sentiment: FeedbackSentiment;
 };
 
 export function isFeedbackItem(data: unknown): data is FeedbackItem {
@@ -26,7 +26,7 @@ export function isFeedbackItem(data: unknown): data is FeedbackItem {
     typeof o.task === "string" &&
     typeof o.time === "string" &&
     typeof o.type === "string" &&
-    o.reason === "not_suitable"
+    (o.sentiment === "positive" || o.sentiment === "negative")
   );
 }
 

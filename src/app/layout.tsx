@@ -1,5 +1,4 @@
 import type { Metadata } from "next";
-import { ConvexClientProvider } from "@/components/convex-provider";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
@@ -14,8 +13,9 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "Planner — Daily check-in",
-  description: "Energy, clarity, cycle context, and today’s tasks",
+  title: "Cadence — Adaptive daily planning",
+  description:
+    "A daily planner that shapes your schedule around your energy, clarity, and priorities.",
 };
 
 export default function RootLayout({
@@ -28,9 +28,7 @@ export default function RootLayout({
       lang="en"
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
-      <body className="flex min-h-full flex-col">
-        <ConvexClientProvider>{children}</ConvexClientProvider>
-      </body>
+      <body className="flex min-h-full flex-col">{children}</body>
     </html>
   );
 }

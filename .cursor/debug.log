@@ -1,4 +1,0 @@
-{"runId":"pre-fix-verify","hypothesisId":"H1_COMPLETION_UNDEFINED","location":"src/app/api/plan/route.ts:194","message":"completion presence before null check","data":{"hasCompletion":true},"timestamp":1778314620962}
-{"runId":"pre-fix-verify","hypothesisId":"H3_RAW_CONTENT_EMPTY","location":"src/app/api/plan/route.ts:214","message":"raw completion content after null guard","data":{"rawLength":1025,"trimmedEmpty":false},"timestamp":1778314620963}
-{"hypothesisId":"H1_DOM","location":"page.tsx:MountProbe","message":"Homepage DOM anchor href count and origin","data":{"origin":"http://localhost:3001","anchorCount":0},"timestamp":1778314837830}
-{"hypothesisId":"H1_DOM","location":"page.tsx:MountProbe","message":"Homepage DOM anchor href count and origin","data":{"origin":"http://localhost:3001","anchorCount":0},"timestamp":1778314837830,"nodeCwd":"/Users/chochanmyeioo/aie-hack/planner"}

@@ -2,7 +2,7 @@
 
 > **Your day, shaped by how you actually feel.**
 
-Most planners treat every Monday the same. Cadence adapts your schedule to how you actually feel today — based on sleep debt, energy levels, menstrual cycle phase, and accumulated feedback. It is a personal executive assistant that learns you over time.
+Most planners treat every Monday the same. Cadence adapts your schedule to how you actually feel today — based on sleep debt, energy levels, menstrual cycle phase, and accumulated feedback. In the public no-login demo, plans and ratings stay in the visitor's browser.
 
 **Live demo:** [cadence-planner-zeta.vercel.app](https://cadence-planner-zeta.vercel.app/)
 
@@ -46,16 +46,26 @@ OpenAI generates an adapted schedule + rationale
         ↓
 ElevenLabs narrates WHY the day is shaped this way
         ↓
-Convex saves the plan → system learns patterns over time
+Browser-local storage saves the plan and ratings
+        ↓
+Recent ratings guide later plans on the same device
 ```
 
 ### The Adaptive Loop
 
-1. **Day 1:** User generates a plan. System saves it.
-2. **Day 2:** User gives feedback (thumbs down on "deep work at 9 AM"). System remembers.
+1. **Day 1:** User generates a plan. The browser saves it locally.
+2. **Day 2:** User gives positive or negative feedback. The same browser remembers it.
 3. **Day 3:** Same state → different plan. Deep work moved to 2 PM. The system adapted.
 
-Over time, the "What I know about you" panel builds a profile: average sleep, preferred deep-work windows, cycle patterns. The more you use it, the less you need to tell it.
+Over time, the "What I know about you" panel builds a device-local profile: average sleep, preferred deep-work windows, and cycle patterns. Clearing browser storage clears this profile.
+
+### Portfolio Demo Privacy
+
+- No account or login is required.
+- Plans, tasks, cycle information, and feedback are stored only in browser `localStorage`.
+- The morning brief is a preview; the demo does not send email.
+- Paid AI routes apply request and input-size limits. Hosting-level rate limiting and provider spending caps are still recommended for a production deployment.
+- The Convex storage prototype is retained as internal-only code for a future authenticated version; it is not used by the public demo.
 
 ---
 
@@ -83,11 +93,12 @@ The adapted JSONL output is included in this repository at [`/data/adaption-labs
 | Layer | Tool | Purpose |
 |---|---|---|
 | Frontend | Next.js + Tailwind + shadcn/ui | Responsive UI with persona cards, sliders, timeline |
-| Backend / State | Convex | Real-time reactive database — stores plans, computes patterns, live sync |
-| Planning Engine | OpenAI (GPT-4o) | Generates adaptive schedules with structured JSON output |
+| Demo State | Browser localStorage | Private no-login plan history and persisted feedback |
+| Backend Prototype | Convex | Internal-only storage prototype for a future authenticated version |
+| Planning Engine | OpenAI | Generates adaptive schedules with structured JSON output |
 | Research Grounding | Adaption Labs | Processed academic papers into training data |
 | Voice | ElevenLabs | Text-to-speech narration of daily rationale |
-| Build Tool | Cursor (IDE + SDK) | Entire app built with Cursor Agent mode |
+| Build Tool | Cursor | App developed with agent-assisted engineering workflows |
 | Hosting | Vercel | One-click deployment with environment variables |
 | Strategy | Manus | Product architecture, sponsor analysis, demo scripting |
 
@@ -105,12 +116,9 @@ npm install
 
 # Set up environment
 cp .env.example .env.local
-# Fill in: OPENAI_API_KEY, ELEVENLABS_API_KEY, NEXT_PUBLIC_CONVEX_URL
+# Fill in: OPENAI_API_KEY and ELEVENLABS_API_KEY
 
-# Start Convex (in one terminal)
-npx convex dev
-
-# Start Next.js (in another terminal)
+# Start Next.js
 npm run dev
 ```
 
@@ -120,11 +128,11 @@ Open [http://localhost:3000](http://localhost:3000).
 
 ## Sponsor Tracks
 
-This project targets the following AIE Hackathon sponsor tracks:
+The original hackathon prototype targeted these sponsor tracks:
 
 - **Adaption Labs** — Most creative use of Adaptive Data (paper ingestion → training dataset → grounded planner)
-- **Convex** — Best use of Convex (real-time plan history, pattern computation, live reactivity)
-- **Cursor** — Best use of Cursor SDK (entire app built with Cursor Agent; SDK used for calendar export)
+- **Convex** — Original persistence prototype; public portfolio storage is now local until authentication is added
+- **Cursor** — Agent-assisted product and engineering workflow
 - **OpenAI** — Best use of OpenAI (few-shot research-grounded planning with structured JSON output)
 - **ElevenLabs** — Voice rationale feature
 
@@ -141,12 +149,14 @@ cadence-planner/
 │   │   │   ├── speak/route.ts       # ElevenLabs TTS endpoint
 │   │   │   └── export-calendar/     # .ics calendar export
 │   │   └── page.tsx                 # Main UI
+│   ├── hooks/
+│   │   └── use-local-plans.ts       # Private browser persistence
 │   ├── data/
 │   │   └── few-shot-examples.ts     # Research-grounded examples
-│   └── lib/
+│   └── lib/                          # Validation, duration, rate-limit helpers
 ├── convex/
 │   ├── schema.ts                    # Database schema
-│   └── plans.ts                     # Mutations & queries
+│   └── plans.ts                     # Internal-only storage prototype
 ├── data/
 │   └── adaption-labs-output.jsonl   # Raw Adaption Labs output
 └── public/

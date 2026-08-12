@@ -1,12 +1,9 @@
 "use client";
 
-import { useMutation, useQuery } from "convex/react";
-import { ChevronDown, ThumbsDown, ThumbsUp } from "lucide-react";
+import { ChevronDown, Mic, MicOff, ThumbsDown, ThumbsUp } from "lucide-react";
 import Image from "next/image";
 import * as React from "react";
 
-import { api } from "../../convex/_generated/api";
-import type { Doc, Id } from "../../convex/_generated/dataModel";
 import { Button } from "@/components/ui/button";
 import {
   Card,
@@ -26,9 +23,17 @@ import {
 } from "@/components/ui/select";
 import { Slider } from "@/components/ui/slider";
 import { Textarea } from "@/components/ui/textarea";
-import { postAgentLog } from "@/lib/agent-debug-log";
+import { useLocalPlans } from "@/hooks/use-local-plans";
 import {
-  isPlanResponseBody,
+  fetchCalendarExport,
+  fetchMorningBriefPreview,
+  fetchPlanFromApi,
+  fetchRealtimeSession,
+  type PlanRequestPayload,
+} from "@/lib/client-api";
+import { durationLabelToMinutes } from "@/lib/duration";
+import { recentFeedback, type SavedPlan } from "@/lib/local-plans";
+import {
   type FeedbackItem,
   type PlanResponseBody,
   type PlanScheduleItem,
@@ -44,12 +49,7 @@ const cycleOptions = [
   { value: "none", label: "N/A / Not applicable" },
 ] as const;
 
-function durationStringToMinutes(s: string): number {
-  const m = String(s).match(/[\d.]+/);
-  if (!m) return 0;
-  const n = parseFloat(m[0]);
-  return Number.isFinite(n) ? n : 0;
-}
+type CyclePhaseValue = (typeof cycleOptions)[number]["value"];
 
 function cycleDisplayLabel(storedPhase: string): string {
   if (storedPhase === "na") return "N/A / Not applicable";
@@ -76,7 +76,7 @@ function parseHourFromTimeLabel(label: string): number | null {
   return hour;
 }
 
-function deepWorkPatternSummary(plans: Doc<"plans">[]): string {
+function deepWorkPatternSummary(plans: SavedPlan[]): string {
   const deepWorkItems = plans.flatMap((plan) =>
     plan.schedule.filter(
       (item) =>
@@ -177,135 +177,161 @@ const PERSONA_PRESETS = [
   },
 ] as const;
 
-type PlanRequestPayload = {
-  sleep: number;
-  energy: number;
-  clarity: number;
-  cyclePhase: string | null;
-  tasks: string;
-  feedback?: FeedbackItem[];
+type VoiceCheckInStatus =
+  | "idle"
+  | "connecting"
+  | "listening"
+  | "processing"
+  | "applied"
+  | "error";
+
+type CheckInToolCall = {
+  argumentsJson: string;
+  callId: string | null;
 };
 
-type ExportCalendarPayload = {
-  schedule: PlanScheduleItem[];
-};
-
-type MorningBriefResponse = {
-  subject: string;
-  html: string;
-};
+const CHECKIN_TOOL_NAME = "set_checkin_inputs";
+const VOICE_EXTRACTION_TIMEOUT_MS = 8000;
 
 function feedbackKey(time: string, task: string): string {
   return `${time}::${task}`;
 }
 
-async function fetchPlanFromApi(body: PlanRequestPayload): Promise<
-  | { ok: true; data: PlanResponseBody }
-  | { ok: false; error: string }
-> {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
+function readVoiceRating(value: unknown): number | null {
+  const raw =
+    typeof value === "number"
+      ? value
+      : typeof value === "string"
+        ? Number(value)
+        : NaN;
+  if (!Number.isFinite(raw)) return null;
+  return Math.min(10, Math.max(1, Math.round(raw)));
+}
+
+function normalizeVoiceCyclePhase(value: unknown): CyclePhaseValue | null {
+  if (typeof value !== "string") return null;
+  const normalized = value.trim().toLowerCase();
+  if (normalized === "n/a" || normalized === "na" || normalized === "none") {
+    return "none";
+  }
+  const option = cycleOptions.find((item) => item.value === normalized);
+  return option?.value ?? null;
+}
+
+function readVoiceTasks(value: unknown): string | null {
+  if (typeof value === "string") {
+    const trimmed = value.trim();
+    return trimmed ? trimmed : null;
+  }
+  if (Array.isArray(value)) {
+    const lines = value
+      .map((item) => (typeof item === "string" ? item.trim() : ""))
+      .filter(Boolean);
+    return lines.length > 0 ? lines.join("\n") : null;
+  }
+  return null;
+}
+
+function parseCheckInArguments(argumentsJson: string): Record<string, unknown> | null {
   try {
-    const res = await fetch("/api/plan", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-    const payload: unknown = await res.json().catch(() => null);
-    if (!res.ok) {
-      const msg =
-        payload &&
-        typeof payload === "object" &&
-        "error" in payload &&
-        typeof (payload as { error: unknown }).error === "string"
-          ? (payload as { error: string }).error
-          : `Request failed (${res.status})`;
-      return { ok: false, error: msg };
-    }
-    if (!isPlanResponseBody(payload)) {
-      return { ok: false, error: "Unexpected response from server." };
-    }
-    return { ok: true, data: payload };
+    const parsed: unknown = JSON.parse(argumentsJson);
+    return isRecord(parsed) ? parsed : null;
   } catch {
-    return {
-      ok: false,
-      error: "Network error. Check your connection and try again.",
-    };
+    return null;
   }
 }
 
-async function fetchMorningBriefPreview(): Promise<
-  | { ok: true; data: MorningBriefResponse }
-  | { ok: false; error: string }
-> {
-  try {
-    const res = await fetch("/api/morning-brief", { method: "GET" });
-    const payload: unknown = await res.json().catch(() => null);
-    if (!res.ok) {
-      const msg =
-        payload &&
-        typeof payload === "object" &&
-        "error" in payload &&
-        typeof (payload as { error: unknown }).error === "string"
-          ? (payload as { error: string }).error
-          : `Request failed (${res.status})`;
-      return { ok: false, error: msg };
-    }
-    if (!payload || typeof payload !== "object") {
-      return { ok: false, error: "Unexpected response from server." };
-    }
-    const maybe = payload as Partial<MorningBriefResponse>;
-    if (typeof maybe.subject !== "string" || typeof maybe.html !== "string") {
-      return { ok: false, error: "Unexpected response from server." };
-    }
-    return { ok: true, data: { subject: maybe.subject, html: maybe.html } };
-  } catch {
-    return {
-      ok: false,
-      error: "Network error. Check your connection and try again.",
-    };
-  }
+function realtimeCallKey(value: Record<string, unknown>): string | null {
+  if (typeof value.call_id === "string") return `call:${value.call_id}`;
+  if (typeof value.item_id === "string") return `item:${value.item_id}`;
+  if (isRecord(value.item)) return realtimeCallKey(value.item);
+  return null;
 }
 
-async function fetchCalendarExport(
-  body: ExportCalendarPayload,
-): Promise<
-  | { ok: true; data: { fileContents: string; filename: string } }
-  | { ok: false; error: string }
-> {
-  try {
-    const res = await fetch("/api/export-calendar", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+function realtimeCallId(value: Record<string, unknown>): string | null {
+  if (typeof value.call_id === "string") return value.call_id;
+  if (isRecord(value.item) && typeof value.item.call_id === "string") {
+    return value.item.call_id;
+  }
+  return null;
+}
 
-    if (!res.ok) {
-      const payload: unknown = await res.json().catch(() => null);
-      const msg =
-        payload &&
-        typeof payload === "object" &&
-        "error" in payload &&
-        typeof (payload as { error: unknown }).error === "string"
-          ? (payload as { error: string }).error
-          : `Request failed (${res.status})`;
-      return { ok: false, error: msg };
-    }
+function realtimeToolName(value: Record<string, unknown>): string | null {
+  if (typeof value.name === "string") return value.name;
+  if (isRecord(value.item) && typeof value.item.name === "string") {
+    return value.item.name;
+  }
+  return null;
+}
 
-    const fileContents = await res.text();
-    const disposition = res.headers.get("Content-Disposition");
-    const filenameMatch = disposition?.match(/filename="?([^"]+)"?/i);
-    return {
-      ok: true,
-      data: {
-        fileContents,
-        filename: filenameMatch?.[1] ?? "planner-schedule.ics",
+function realtimeToolArguments(value: Record<string, unknown>): string | null {
+  if (typeof value.arguments === "string") return value.arguments;
+  if (isRecord(value.item) && typeof value.item.arguments === "string") {
+    return value.item.arguments;
+  }
+  return null;
+}
+
+function toolCallFromRealtimeItem(item: unknown): CheckInToolCall | null {
+  if (
+    !isRecord(item) ||
+    item.type !== "function_call" ||
+    item.name !== CHECKIN_TOOL_NAME ||
+    typeof item.arguments !== "string"
+  ) {
+    return null;
+  }
+
+  return {
+    argumentsJson: item.arguments,
+    callId: typeof item.call_id === "string" ? item.call_id : null,
+  };
+}
+
+function extractCheckInToolCalls(
+  event: unknown,
+  bufferedArguments?: Map<string, string>,
+): CheckInToolCall[] {
+  if (!isRecord(event)) return [];
+
+  if (event.type === "response.function_call_arguments.done") {
+    const name = realtimeToolName(event);
+    const key = realtimeCallKey(event);
+    const argumentsJson =
+      realtimeToolArguments(event) ?? (key ? bufferedArguments?.get(key) : null);
+    if (name && name !== CHECKIN_TOOL_NAME) return [];
+    if (!argumentsJson) return [];
+    return [
+      {
+        argumentsJson,
+        callId: realtimeCallId(event),
       },
-    };
-  } catch {
-    return {
-      ok: false,
-      error: "Network error while exporting calendar. Please try again.",
-    };
+    ];
   }
+
+  if (
+    event.type === "response.output_item.done" ||
+    event.type === "conversation.item.created"
+  ) {
+    const call = toolCallFromRealtimeItem(event.item);
+    return call ? [call] : [];
+  }
+
+  if (event.type !== "response.done" || !isRecord(event.response)) {
+    return [];
+  }
+
+  const output = event.response.output;
+  if (!Array.isArray(output)) return [];
+
+  return output.flatMap((item): CheckInToolCall[] => {
+    const call = toolCallFromRealtimeItem(item);
+    return call ? [call] : [];
+  });
 }
 
 /** Only allow http(s); strips common trailing punctuation from the match. */
@@ -401,20 +427,6 @@ function speakWithBrowserSynth(text: string) {
   syn.cancel();
   let spoken = false;
 
-  const vsInitial = syn.getVoices().length;
-  // #region agent log
-  postAgentLog({
-    hypothesisId: "H_SYNTH_WIRE",
-    location: "page.tsx:speakWithBrowserSynth",
-    message: "enter",
-    data: {
-      voicesInitial: vsInitial,
-      textChars: Math.min(text.length, 4096),
-    },
-    timestamp: Date.now(),
-  });
-  // #endregion
-
   const run = () => {
     if (spoken) return;
     spoken = true;
@@ -427,42 +439,6 @@ function speakWithBrowserSynth(text: string) {
       vs.find((v) => v.lang.toLowerCase().startsWith("en")) ??
       vs[0];
     if (en) u.voice = en;
-    u.onstart = () => {
-      // #region agent log
-      postAgentLog({
-        hypothesisId: "H_SYNTH_UTT",
-        location: "page.tsx:speakWithBrowserSynth",
-        message: "utterance onstart",
-        data: {
-          voiceUri: en?.voiceURI ?? null,
-          voiceLang: en?.lang ?? null,
-        },
-        timestamp: Date.now(),
-      });
-      // #endregion
-    };
-    u.onend = () => {
-      // #region agent log
-      postAgentLog({
-        hypothesisId: "H_SYNTH_UTT",
-        location: "page.tsx:speakWithBrowserSynth",
-        message: "utterance onend",
-        data: {},
-        timestamp: Date.now(),
-      });
-      // #endregion
-    };
-    u.onerror = (e: SpeechSynthesisErrorEvent) => {
-      // #region agent log
-      postAgentLog({
-        hypothesisId: "H_SYNTH_UTT_ERR",
-        location: "page.tsx:speakWithBrowserSynth",
-        message: "utterance onerror",
-        data: { code: e.error, chars: Math.min(text.length, 4096) },
-        timestamp: Date.now(),
-      });
-      // #endregion
-    };
     syn.speak(u);
   };
   if (syn.getVoices().length > 0) {
@@ -555,9 +531,9 @@ export default function Home() {
   const [sleepQuality, setSleepQuality] = React.useState(5);
   const [bodyEnergy, setBodyEnergy] = React.useState(5);
   const [mentalClarity, setMentalClarity] = React.useState(5);
-  const [cyclePhase, setCyclePhase] = React.useState<
-    (typeof cycleOptions)[number]["value"] | null
-  >(null);
+  const [cyclePhase, setCyclePhase] = React.useState<CyclePhaseValue | null>(
+    null,
+  );
   const [tasks, setTasks] = React.useState("");
   const [plan, setPlan] = React.useState<PlanResponseBody | null>(null);
   const [planInputs, setPlanInputs] =
@@ -572,9 +548,7 @@ export default function Home() {
   const [morningBriefSubject, setMorningBriefSubject] = React.useState("");
   const [morningBriefHtml, setMorningBriefHtml] = React.useState("");
   const [feedback, setFeedback] = React.useState<FeedbackItem[]>([]);
-  const [upvotedKeys, setUpvotedKeys] = React.useState<Set<string>>(
-    () => new Set<string>(),
-  );
+  const [currentPlanId, setCurrentPlanId] = React.useState<string | null>(null);
   const [feedbackToast, setFeedbackToast] = React.useState<{
     message: string;
     tone: "positive" | "negative" | "info";
@@ -585,6 +559,10 @@ export default function Home() {
   const [speakSynthAwaitingTap, setSpeakSynthAwaitingTap] =
     React.useState(false);
   const [speakHint, setSpeakHint] = React.useState<string | null>(null);
+  const [voiceStatus, setVoiceStatus] =
+    React.useState<VoiceCheckInStatus>("idle");
+  const [voiceMessage, setVoiceMessage] = React.useState<string | null>(null);
+  const [voiceError, setVoiceError] = React.useState<string | null>(null);
   const [exportingCalendar, setExportingCalendar] = React.useState(false);
   const [exportCalendarError, setExportCalendarError] = React.useState<
     string | null
@@ -596,16 +574,67 @@ export default function Home() {
   const pendingSynthTextRef = React.useRef<string | null>(null);
   const speakAudioRef = React.useRef<HTMLAudioElement | null>(null);
   const speakCtxRef = React.useRef<AudioContext | null>(null);
+  const voiceAudioRef = React.useRef<HTMLAudioElement | null>(null);
+  const voicePeerRef = React.useRef<RTCPeerConnection | null>(null);
+  const voiceDataChannelRef = React.useRef<RTCDataChannel | null>(null);
+  const voiceStreamRef = React.useRef<MediaStream | null>(null);
+  const voiceAppliedRef = React.useRef(false);
+  const voiceResponseRequestedRef = React.useRef(false);
+  const voiceAttemptRef = React.useRef(0);
+  const voiceExtractionTimeoutRef = React.useRef<number | null>(null);
+  const voiceArgumentBuffersRef = React.useRef<Map<string, string>>(
+    new Map<string, string>(),
+  );
 
-  const savePlanMutation = useMutation(api.plans.savePlan);
-  const seedDemoDataMutation = useMutation(api.plans.seedDemoData);
-  const recentPlans = useQuery(api.plans.getRecentPlans);
-  const allPlans = useQuery(api.plans.getAllPlans);
-  const [expandedHistoryId, setExpandedHistoryId] =
-    React.useState<Id<"plans"> | null>(null);
-  const [seedingDemoData, setSeedingDemoData] = React.useState(false);
-  const [seedDemoDataError, setSeedDemoDataError] = React.useState<string | null>(
-    null,
+  const { plans: localPlans, savePlan, saveFeedback } = useLocalPlans();
+  const recentPlans = localPlans?.slice(0, 7) ?? null;
+  const allPlans = localPlans;
+  const savedFeedback = React.useMemo(
+    () => recentFeedback(localPlans ?? []),
+    [localPlans],
+  );
+  const [expandedHistoryId, setExpandedHistoryId] = React.useState<
+    string | null
+  >(null);
+
+  const stopVoiceCheckIn = React.useCallback(
+    (nextStatus?: VoiceCheckInStatus) => {
+      voiceAttemptRef.current += 1;
+      if (voiceExtractionTimeoutRef.current !== null) {
+        window.clearTimeout(voiceExtractionTimeoutRef.current);
+        voiceExtractionTimeoutRef.current = null;
+      }
+      voiceResponseRequestedRef.current = false;
+      voiceArgumentBuffersRef.current.clear();
+
+      const channel = voiceDataChannelRef.current;
+      voiceDataChannelRef.current = null;
+      try {
+        if (channel && channel.readyState !== "closed") channel.close();
+      } catch {
+        /* noop */
+      }
+
+      const peer = voicePeerRef.current;
+      voicePeerRef.current = null;
+      try {
+        if (peer && peer.connectionState !== "closed") peer.close();
+      } catch {
+        /* noop */
+      }
+
+      const stream = voiceStreamRef.current;
+      voiceStreamRef.current = null;
+      stream?.getTracks().forEach((track) => track.stop());
+
+      if (voiceAudioRef.current) {
+        voiceAudioRef.current.pause();
+        voiceAudioRef.current.srcObject = null;
+      }
+
+      if (nextStatus) setVoiceStatus(nextStatus);
+    },
+    [],
   );
 
   const historyCards = React.useMemo(() => {
@@ -652,90 +681,41 @@ export default function Home() {
   }, []);
 
   React.useEffect(() => {
+    return () => stopVoiceCheckIn();
+  }, [stopVoiceCheckIn]);
+
+  React.useEffect(() => {
     if (speakObjectUrlRef.current) {
       URL.revokeObjectURL(speakObjectUrlRef.current);
       speakObjectUrlRef.current = null;
     }
     speakAwaitingTapRef.current = false;
-    setSpeakAwaitingTap(false);
     speakSynthAwaitingTapRef.current = false;
     pendingSynthTextRef.current = null;
-    setSpeakSynthAwaitingTap(false);
-    setSpeakHint(null);
-    setSpeakError(null);
+    queueMicrotask(() => {
+      setSpeakAwaitingTap(false);
+      setSpeakSynthAwaitingTap(false);
+      setSpeakHint(null);
+      setSpeakError(null);
+    });
   }, [plan]);
 
-  React.useEffect(() => {
-    // #region agent log
-    const origin =
-      typeof window !== "undefined" ? window.location.origin : "ssr";
-    const anchorCount =
-      typeof document !== "undefined"
-        ? document.querySelectorAll("a[href]").length
-        : -1;
-    postAgentLog({
-      hypothesisId: "H1_DOM",
-      location: "page.tsx:MountProbe",
-      message: "Homepage DOM anchor href count and origin",
-      data: { origin, anchorCount },
-      timestamp: Date.now(),
-    });
-    // #endregion
-  }, []);
-
-  React.useEffect(() => {
-    // #region agent log
-    const handler = (e: MouseEvent) => {
-      const el = e.target;
-      const anchor =
-        el instanceof Element ? el.closest("a[href]") : null;
-      if (!(anchor instanceof HTMLAnchorElement)) return;
-      postAgentLog({
-        hypothesisId: "H3_CLICK",
-        location: "page.tsx:delegatedClick",
-        message: "Click reached an anchor",
-        data: { hrefScheme: anchor.href.slice(0, 12) },
-        timestamp: Date.now(),
-      });
-    };
-    document.addEventListener("click", handler, true);
-    return () => document.removeEventListener("click", handler, true);
-    // #endregion
-  }, []);
-
-  React.useEffect(() => {
-    if (!plan) return;
-    // #region agent log
-    const blob = `${plan.rationale}\n${plan.schedule.map((i) => i.task).join("\n")}`;
-    const rawUrls = [...blob.matchAll(/\bhttps?:\/\/[^\s\])>]+/g)];
-    const mdUrls = [...blob.matchAll(/\]\((https?:\/\/[^)\s]+)\)/g)].map((m) => m[1]);
-    postAgentLog({
-      hypothesisId: "H2_PLAINTEXT",
-      location: "page.tsx:PlanTextScan",
-      message: "URL-like substrings inside model-rendered prose",
-      data: {
-        rawHttpsCount: rawUrls.length,
-        markdownParenUrlCount: mdUrls.length,
-        sampleRaw: rawUrls[0]?.[0]?.slice(0, 100) ?? null,
-      },
-      timestamp: Date.now(),
-    });
-    const httpAnchors =
-      typeof document !== "undefined"
-        ? document.querySelectorAll('a[href^="http"]').length
-        : -1;
-    postAgentLog({
-      hypothesisId: "H_VERIFY",
-      location: "page.tsx:PlanTextScan",
-      message: "http(s) anchor count after plan commit (post-linkify)",
-      data: { httpAnchors },
-      timestamp: Date.now(),
-    });
-    // #endregion
-  }, [plan]);
-
-  const feedbackKeys = React.useMemo(
-    () => new Set(feedback.map((f) => feedbackKey(f.time, f.task))),
+  const downvotedKeys = React.useMemo(
+    () =>
+      new Set(
+        feedback
+          .filter((item) => item.sentiment === "negative")
+          .map((item) => feedbackKey(item.time, item.task)),
+      ),
+    [feedback],
+  );
+  const upvotedKeys = React.useMemo(
+    () =>
+      new Set(
+        feedback
+          .filter((item) => item.sentiment === "positive")
+          .map((item) => feedbackKey(item.time, item.task)),
+      ),
     [feedback],
   );
 
@@ -745,66 +725,368 @@ export default function Home() {
     return () => clearTimeout(timer);
   }, [feedbackToast]);
 
-  function handleThumbsDown(item: PlanScheduleItem) {
-    const key = feedbackKey(item.time, item.task);
-    const wasDownvoted = feedback.some(
-      (f) => feedbackKey(f.time, f.task) === key,
-    );
+  function clearVoiceExtractionTimeout() {
+    if (voiceExtractionTimeoutRef.current === null) return;
+    window.clearTimeout(voiceExtractionTimeoutRef.current);
+    voiceExtractionTimeoutRef.current = null;
+  }
 
-    if (wasDownvoted) {
-      setFeedback((prev) =>
-        prev.filter((f) => feedbackKey(f.time, f.task) !== key),
+  function armVoiceExtractionTimeout() {
+    clearVoiceExtractionTimeout();
+    voiceExtractionTimeoutRef.current = window.setTimeout(() => {
+      if (voiceAppliedRef.current) return;
+      setVoiceStatus("error");
+      setVoiceError(
+        "I heard you, but couldn't extract inputs. Try one more sentence with numbers.",
       );
-      setFeedbackToast({ message: "Feedback cleared", tone: "info" });
+      stopVoiceCheckIn();
+    }, VOICE_EXTRACTION_TIMEOUT_MS);
+  }
+
+  function requestVoiceCheckInResponse(channel: RTCDataChannel) {
+    if (
+      voiceResponseRequestedRef.current ||
+      channel.readyState !== "open" ||
+      voiceAppliedRef.current
+    ) {
       return;
     }
 
-    setFeedback((prev) => [
-      ...prev,
-      {
-        task: item.task,
-        time: item.time,
-        type: item.type,
-        reason: "not_suitable",
-      },
-    ]);
-    setUpvotedKeys((prev) => {
-      if (!prev.has(key)) return prev;
-      const next = new Set(prev);
-      next.delete(key);
-      return next;
-    });
+    voiceResponseRequestedRef.current = true;
+    setVoiceStatus("processing");
+    setVoiceMessage("Processing your check-in...");
+    armVoiceExtractionTimeout();
+    channel.send(
+      JSON.stringify({
+        type: "response.create",
+        response: {
+          output_modalities: ["text"],
+          max_output_tokens: 512,
+        },
+      }),
+    );
+  }
+
+  function applyVoiceCheckInInputs(args: Record<string, unknown>): boolean {
+    const filled: string[] = [];
+
+    const sleep = readVoiceRating(args.sleep);
+    if (sleep !== null) {
+      setSleepQuality(sleep);
+      filled.push("sleep");
+    }
+
+    const energy = readVoiceRating(args.energy);
+    if (energy !== null) {
+      setBodyEnergy(energy);
+      filled.push("energy");
+    }
+
+    const clarity = readVoiceRating(args.clarity);
+    if (clarity !== null) {
+      setMentalClarity(clarity);
+      filled.push("clarity");
+    }
+
+    const phase = normalizeVoiceCyclePhase(args.cyclePhase);
+    if (phase !== null) {
+      setCyclePhase(phase);
+      filled.push("cycle phase");
+    }
+
+    const nextTasks = readVoiceTasks(args.tasks);
+    if (nextTasks !== null) {
+      setTasks(nextTasks);
+      filled.push("tasks");
+    }
+
+    if (filled.length === 0) {
+      setVoiceError("I could not map that check-in to the form yet.");
+      setVoiceStatus("error");
+      return false;
+    }
+
+    setVoiceError(null);
+    setVoiceStatus("applied");
+    setVoiceMessage(
+      `Filled ${filled.join(", ")} from your voice check-in. Review and edit before generating your plan.`,
+    );
+    return true;
+  }
+
+  function handleCheckInToolCall(call: CheckInToolCall, channel: RTCDataChannel) {
+    if (voiceAppliedRef.current) return;
+    voiceAppliedRef.current = true;
+    clearVoiceExtractionTimeout();
+
+    const parsed = parseCheckInArguments(call.argumentsJson);
+    const applied = parsed ? applyVoiceCheckInInputs(parsed) : false;
+
+    if (!parsed) {
+      setVoiceError("Voice check-in returned unreadable form inputs.");
+      setVoiceStatus("error");
+    }
+
+    if (call.callId && channel.readyState === "open") {
+      channel.send(
+        JSON.stringify({
+          type: "conversation.item.create",
+          item: {
+            type: "function_call_output",
+            call_id: call.callId,
+            output: JSON.stringify({ ok: applied }),
+          },
+        }),
+      );
+    }
+
+    window.setTimeout(() => stopVoiceCheckIn(applied ? "applied" : "error"), 250);
+  }
+
+  async function handleVoiceCheckIn() {
+    const voiceBusy =
+      voiceStatus === "connecting" ||
+      voiceStatus === "listening" ||
+      voiceStatus === "processing";
+
+    if (voiceBusy) {
+      stopVoiceCheckIn("idle");
+      setVoiceMessage("Voice check-in stopped.");
+      setVoiceError(null);
+      return;
+    }
+
+    if (
+      typeof window === "undefined" ||
+      typeof RTCPeerConnection === "undefined" ||
+      !navigator.mediaDevices?.getUserMedia
+    ) {
+      setVoiceStatus("error");
+      setVoiceError("This browser cannot start a WebRTC voice check-in.");
+      return;
+    }
+
+    setVoiceStatus("connecting");
+    setVoiceMessage(null);
+    setVoiceError(null);
+    voiceAppliedRef.current = false;
+    voiceResponseRequestedRef.current = false;
+    voiceArgumentBuffersRef.current.clear();
+    clearVoiceExtractionTimeout();
+    const attemptId = voiceAttemptRef.current + 1;
+    voiceAttemptRef.current = attemptId;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      if (voiceAttemptRef.current !== attemptId) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      voiceStreamRef.current = stream;
+
+      const session = await fetchRealtimeSession();
+      if (voiceAttemptRef.current !== attemptId) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+      if (!session.ok) {
+        throw new Error(session.error);
+      }
+
+      const peer = new RTCPeerConnection();
+      voicePeerRef.current = peer;
+
+      peer.ontrack = (event) => {
+        if (voiceAudioRef.current) {
+          voiceAudioRef.current.srcObject = event.streams[0];
+        }
+      };
+
+      peer.addEventListener("connectionstatechange", () => {
+        if (voicePeerRef.current !== peer) return;
+        if (
+          peer.connectionState === "failed" ||
+          peer.connectionState === "disconnected"
+        ) {
+          setVoiceStatus("error");
+          setVoiceError("Voice check-in disconnected.");
+          stopVoiceCheckIn();
+        }
+      });
+
+      for (const track of stream.getAudioTracks()) {
+        peer.addTrack(track, stream);
+      }
+
+      const channel = peer.createDataChannel("oai-events");
+      voiceDataChannelRef.current = channel;
+
+      channel.addEventListener("open", () => {
+        setVoiceStatus("listening");
+        setVoiceMessage("Listening. Pause after your check-in to fill the form.");
+      });
+
+      channel.addEventListener("message", (event) => {
+        let serverEvent: unknown;
+        try {
+          serverEvent = JSON.parse(String(event.data));
+        } catch {
+          return;
+        }
+
+        if (isRecord(serverEvent)) {
+          if (serverEvent.type === "input_audio_buffer.speech_stopped") {
+            setVoiceStatus("processing");
+            setVoiceMessage("Processing your check-in...");
+            armVoiceExtractionTimeout();
+            window.setTimeout(() => requestVoiceCheckInResponse(channel), 350);
+          }
+
+          if (serverEvent.type === "input_audio_buffer.committed") {
+            requestVoiceCheckInResponse(channel);
+          }
+
+          if (serverEvent.type === "response.created") {
+            setVoiceStatus("processing");
+            setVoiceMessage("Processing your check-in...");
+            armVoiceExtractionTimeout();
+          }
+
+          if (
+            serverEvent.type === "response.function_call_arguments.delta" &&
+            typeof serverEvent.delta === "string"
+          ) {
+            const key = realtimeCallKey(serverEvent);
+            if (key) {
+              const current = voiceArgumentBuffersRef.current.get(key) ?? "";
+              voiceArgumentBuffersRef.current.set(key, current + serverEvent.delta);
+            }
+          }
+
+          if (serverEvent.type === "error") {
+            const message =
+              isRecord(serverEvent.error) &&
+              typeof serverEvent.error.message === "string"
+                ? serverEvent.error.message
+                : "Voice check-in failed.";
+            setVoiceStatus("error");
+            setVoiceError(message);
+            stopVoiceCheckIn();
+            return;
+          }
+        }
+
+        const calls = extractCheckInToolCalls(
+          serverEvent,
+          voiceArgumentBuffersRef.current,
+        );
+        if (calls.length > 0) {
+          handleCheckInToolCall(calls[0], channel);
+        }
+      });
+
+      const offer = await peer.createOffer();
+      await peer.setLocalDescription(offer);
+      if (voiceAttemptRef.current !== attemptId) return;
+
+      if (!offer.sdp) {
+        throw new Error("Could not create a WebRTC offer.");
+      }
+
+      const sdpResponse = await fetch("https://api.openai.com/v1/realtime/calls", {
+        method: "POST",
+        body: offer.sdp,
+        headers: {
+          Authorization: `Bearer ${session.data.clientSecret}`,
+          "Content-Type": "application/sdp",
+        },
+      });
+
+      const answerSdp = await sdpResponse.text();
+      if (voiceAttemptRef.current !== attemptId) return;
+      if (!sdpResponse.ok) {
+        throw new Error(
+          answerSdp.trim() || `Realtime call failed (${sdpResponse.status})`,
+        );
+      }
+
+      await peer.setRemoteDescription({
+        type: "answer",
+        sdp: answerSdp,
+      });
+    } catch (err) {
+      if (voiceAttemptRef.current !== attemptId) return;
+      stopVoiceCheckIn();
+      setVoiceStatus("error");
+      setVoiceError(
+        err instanceof Error
+          ? err.message.slice(0, 300)
+          : "Could not start voice check-in.",
+      );
+    }
+  }
+
+  function handleThumbsDown(item: PlanScheduleItem) {
+    const key = feedbackKey(item.time, item.task);
+    const wasDownvoted = feedback.some(
+      (entry) =>
+        feedbackKey(entry.time, entry.task) === key &&
+        entry.sentiment === "negative",
+    );
+
+    const withoutItem = feedback.filter(
+      (entry) => feedbackKey(entry.time, entry.task) !== key,
+    );
+    const nextFeedback = wasDownvoted
+      ? withoutItem
+      : [
+          ...withoutItem,
+          {
+            task: item.task,
+            time: item.time,
+            type: item.type,
+            sentiment: "negative" as const,
+          },
+        ];
+    setFeedback(nextFeedback);
+    if (currentPlanId) saveFeedback(currentPlanId, nextFeedback);
     setFeedbackToast({
-      message: "Feedback saved — next plan will adapt",
-      tone: "negative",
+      message: wasDownvoted
+        ? "Feedback cleared"
+        : "Feedback saved in this browser — next plan will adapt",
+      tone: wasDownvoted ? "info" : "negative",
     });
   }
 
   function handleThumbsUp(item: PlanScheduleItem) {
     const key = feedbackKey(item.time, item.task);
-    const wasUpvoted = upvotedKeys.has(key);
-
-    if (wasUpvoted) {
-      setUpvotedKeys((prev) => {
-        const next = new Set(prev);
-        next.delete(key);
-        return next;
-      });
-      setFeedbackToast({ message: "Feedback cleared", tone: "info" });
-      return;
-    }
-
-    setUpvotedKeys((prev) => {
-      const next = new Set(prev);
-      next.add(key);
-      return next;
-    });
-    setFeedback((prev) =>
-      prev.filter((f) => feedbackKey(f.time, f.task) !== key),
+    const wasUpvoted = feedback.some(
+      (entry) =>
+        feedbackKey(entry.time, entry.task) === key &&
+        entry.sentiment === "positive",
     );
+
+    const withoutItem = feedback.filter(
+      (entry) => feedbackKey(entry.time, entry.task) !== key,
+    );
+    const nextFeedback = wasUpvoted
+      ? withoutItem
+      : [
+          ...withoutItem,
+          {
+            task: item.task,
+            time: item.time,
+            type: item.type,
+            sentiment: "positive" as const,
+          },
+        ];
+    setFeedback(nextFeedback);
+    if (currentPlanId) saveFeedback(currentPlanId, nextFeedback);
     setFeedbackToast({
-      message: "Feedback saved — next plan will adapt",
-      tone: "positive",
+      message: wasUpvoted
+        ? "Feedback cleared"
+        : "Feedback saved in this browser — next plan will adapt",
+      tone: wasUpvoted ? "info" : "positive",
     });
   }
 
@@ -819,7 +1101,7 @@ export default function Home() {
     const clarity = override?.clarity ?? mentalClarity;
     const phase = override?.cyclePhase ?? cyclePhase;
     const nextTasks = override?.tasks ?? tasks;
-    const nextFeedback = override?.feedback ?? feedback;
+    const nextFeedback = override?.feedback ?? savedFeedback;
 
     setPlanError(null);
     setExportCalendarError(null);
@@ -832,17 +1114,6 @@ export default function Home() {
         cyclePhase: phase,
         tasks: nextTasks,
         feedback: nextFeedback.length > 0 ? nextFeedback : undefined,
-      });
-      postAgentLog({
-        hypothesisId: "H4_API_REL",
-        location: "page.tsx:afterPlanFetch",
-        message: "/api/plan response status",
-        data: {
-          ok: result.ok,
-          pageOrigin:
-            typeof window !== "undefined" ? window.location.origin : null,
-        },
-        timestamp: Date.now(),
       });
       if (!result.ok) {
         setPlanError(result.error);
@@ -857,7 +1128,8 @@ export default function Home() {
         clarity,
         cyclePhase: phase,
       });
-      void savePlanMutation({
+      setFeedback([]);
+      const savedPlanId = savePlan({
         createdAt,
         sleep,
         energy,
@@ -869,11 +1141,11 @@ export default function Home() {
           time: item.time,
           task: item.task,
           type: item.type,
-          duration: durationStringToMinutes(item.duration),
+          duration: durationLabelToMinutes(item.duration),
         })),
-      }).catch((err: unknown) => {
-        console.error("Convex savePlan failed:", err);
+        feedback: [],
       });
+      setCurrentPlanId(savedPlanId);
     } finally {
       setSubmitting(false);
     }
@@ -884,7 +1156,7 @@ export default function Home() {
     setExportCalendarError(null);
     setExportingCalendar(true);
     try {
-      const result = await fetchCalendarExport({ schedule: plan.schedule });
+      const result = await fetchCalendarExport(plan.schedule);
       if (!result.ok) {
         setExportCalendarError(result.error);
         return;
@@ -907,10 +1179,16 @@ export default function Home() {
   }
 
   async function handleSendMorningBrief() {
+    if (!plan) return;
     setMorningBriefError(null);
     setMorningBriefLoading(true);
     try {
-      const result = await fetchMorningBriefPreview();
+      const result = await fetchMorningBriefPreview({
+        createdAt: Date.now(),
+        tasks,
+        schedule: plan.schedule,
+        rationale: plan.rationale,
+      });
       if (!result.ok) {
         setMorningBriefError(result.error);
         return;
@@ -932,44 +1210,18 @@ export default function Home() {
     setCyclePhase(persona.cyclePhase);
     setTasks(persona.tasks);
     setFeedback([]);
-    setUpvotedKeys(new Set());
     await handleGeneratePlan({
       sleep: persona.sleep,
       energy: persona.energy,
       clarity: persona.clarity,
       cyclePhase: persona.cyclePhase,
       tasks: persona.tasks,
-      feedback: [],
     });
-  }
-
-  async function handleLoadDemoData() {
-    if (seedingDemoData) return;
-    setSeedDemoDataError(null);
-    setSeedingDemoData(true);
-    try {
-      await seedDemoDataMutation({});
-    } catch (err) {
-      setSeedDemoDataError(
-        err instanceof Error ? err.message : "Failed to load demo data.",
-      );
-    } finally {
-      setSeedingDemoData(false);
-    }
   }
 
   async function handlePlayRationale(text: string) {
     const trimmed = text.trim();
     if (!trimmed) {
-      // #region agent log
-      postAgentLog({
-        hypothesisId: "H_TEXT_EMPTY",
-        location: "page.tsx:handlePlayRationale",
-        message: "trimmed rationale empty, early return",
-        data: { rawLen: text.length },
-        timestamp: Date.now(),
-      });
-      // #endregion
       return;
     }
 
@@ -978,15 +1230,6 @@ export default function Home() {
       const synthText = pendingSynthTextRef.current;
       setSpeakHint(null);
       setSpeakError(null);
-      // #region agent log
-      postAgentLog({
-        hypothesisId: "H_SYNTH_PLAY",
-        location: "page.tsx:handlePlayRationale",
-        message: "speechSynthesis invoked (second tap)",
-        data: { textLen: synthText.length },
-        timestamp: Date.now(),
-      });
-      // #endregion
       speakWithBrowserSynth(synthText);
       speakSynthAwaitingTapRef.current = false;
       pendingSynthTextRef.current = null;
@@ -1001,15 +1244,6 @@ export default function Home() {
       setSpeakHint(null);
       setSpeakError(null);
       const el = speakAudioRef.current;
-      // #region agent log
-      postAgentLog({
-        hypothesisId: "H_SYNC_PLAY",
-        location: "page.tsx:handlePlayRationale",
-        message: "second-tap synchronous play invoked",
-        data: { usesHiddenAudio: Boolean(el) },
-        timestamp: Date.now(),
-      });
-      // #endregion
       try {
         const onEnded = () => {
           if (speakObjectUrlRef.current === url) {
@@ -1027,35 +1261,11 @@ export default function Home() {
             .then(() => {
               speakAwaitingTapRef.current = false;
               setSpeakAwaitingTap(false);
-              // #region agent log
-              postAgentLog({
-                hypothesisId: "H_SYNC_PLAY",
-                location: "page.tsx:handlePlayRationale",
-                message: "second-tap audio.play resolved",
-                data: { ok: true },
-                timestamp: Date.now(),
-              });
-              // #endregion
             })
             .catch((err: unknown) => {
-              const m =
-                err instanceof Error ? err.message.slice(0, 300) : "Play failed.";
-              setSpeakError(m);
-              // #region agent log
-              postAgentLog({
-                hypothesisId: "H_SYNC_PLAY_ERR",
-                location: "page.tsx:handlePlayRationale",
-                message: "second-tap play rejected",
-                data: {
-                  name: err instanceof Error ? err.name : "unknown",
-                  msg:
-                    err instanceof Error
-                      ? err.message.slice(0, 200)
-                      : String(err).slice(0, 200),
-                },
-                timestamp: Date.now(),
-              });
-              // #endregion
+              setSpeakError(
+                err instanceof Error ? err.message.slice(0, 300) : "Play failed.",
+              );
             });
         } else {
           const a = new Audio(url);
@@ -1091,16 +1301,6 @@ export default function Home() {
     pendingSynthTextRef.current = null;
     setSpeakSynthAwaitingTap(false);
     try {
-      // #region agent log
-      postAgentLog({
-        hypothesisId: "H_CLIENT_FETCH",
-        location: "page.tsx:handlePlayRationale",
-        message: "speak request start",
-        data: { textLen: trimmed.length },
-        timestamp: Date.now(),
-      });
-      // #endregion
-
       const Ctor =
         typeof window !== "undefined"
           ? window.AudioContext ??
@@ -1135,20 +1335,6 @@ export default function Home() {
 
       if (!res.ok) {
         const errBody = await res.text().catch(() => "");
-        // #region agent log
-        postAgentLog({
-          hypothesisId: "H_CLIENT_ERR",
-          location: "page.tsx:handlePlayRationale",
-          message: "/api/speak non-OK",
-          data: {
-            status: res.status,
-            contentType: resCt,
-            bodyPrefix: errBody.slice(0, 200),
-          },
-          timestamp: Date.now(),
-        });
-        // #endregion
-
         const humanErr = summarizeSpeakApiError(errBody, res.status);
         if (canUseBrowserSpeech()) {
           try {
@@ -1161,25 +1347,9 @@ export default function Home() {
           setSpeakSynthAwaitingTap(true);
           const errShort =
             humanErr.length > 200 ? `${humanErr.slice(0, 200)}…` : humanErr;
-          const fallbackHintRev = "tts-fallback-hint:v3-cloud-tts";
           setSpeakHint(
             `Couldn't use cloud text-to-speech (${errShort}). Tap once more — this page will read the rationale aloud in your browser.`,
           );
-          // #region agent log
-          postAgentLog({
-            hypothesisId: "H_SYNTH_FALLBACK_GENERIC",
-            location: "page.tsx:handlePlayRationale",
-            message:
-              "Any non-OK /api/speak; armed browser speech second tap",
-            data: {
-              httpStatus: res.status,
-              textLen: trimmed.length,
-              hintRev: fallbackHintRev,
-              errSummaryLen: errShort.length,
-            },
-            timestamp: Date.now(),
-          });
-          // #endregion
           return;
         }
 
@@ -1188,21 +1358,6 @@ export default function Home() {
       }
 
       const blob = await res.blob();
-      // #region agent log
-      postAgentLog({
-        hypothesisId: "H_BLOB_INVALID",
-        location: "page.tsx:handlePlayRationale",
-        message: "blob after OK response",
-        data: {
-          blobSize: blob.size,
-          blobType: blob.type,
-          resContentType: resCt,
-          forcedMpegBlob: true,
-        },
-        timestamp: Date.now(),
-      });
-      // #endregion
-
       if (!blob.size) {
         setSpeakError("Empty audio response from the server.");
         return;
@@ -1217,18 +1372,6 @@ export default function Home() {
       speakAwaitingTapRef.current = true;
       setSpeakAwaitingTap(true);
       setSpeakHint("Audio ready — tap the button once more to play.");
-      // #region agent log
-      postAgentLog({
-        hypothesisId: "H_PLAY_GATE",
-        location: "page.tsx:handlePlayRationale",
-        message:
-          "MPEG blob prepared; awaiting second user gesture before play()",
-        data: {
-          typedBlobBytes: typedBlob.size,
-        },
-        timestamp: Date.now(),
-      });
-      // #endregion
     } catch (e) {
       speakAwaitingTapRef.current = false;
       setSpeakAwaitingTap(false);
@@ -1241,16 +1384,6 @@ export default function Home() {
           ? e.message.slice(0, 300)
           : "Could not play audio.",
       );
-      // #region agent log
-      const err = e instanceof Error ? e : new Error(String(e));
-      postAgentLog({
-        hypothesisId: "H_AUDIO_REJECT",
-        location: "page.tsx:handlePlayRationale",
-        message: "catch in speak flow",
-        data: { name: err.name, msg: err.message.slice(0, 200) },
-        timestamp: Date.now(),
-      });
-      // #endregion
       if (speakObjectUrlRef.current) {
         URL.revokeObjectURL(speakObjectUrlRef.current);
         speakObjectUrlRef.current = null;
@@ -1268,11 +1401,26 @@ export default function Home() {
 
   const phaseLabel =
     cycleOptions.find((o) => o.value === cyclePhase)?.label ?? "";
+  const voiceBusy =
+    voiceStatus === "connecting" ||
+    voiceStatus === "listening" ||
+    voiceStatus === "processing";
+  const voiceStatusText =
+    voiceError ??
+    voiceMessage ??
+    (voiceStatus === "connecting"
+      ? "Connecting..."
+      : voiceStatus === "listening"
+        ? "Listening."
+        : voiceStatus === "processing"
+          ? "Processing..."
+          : null);
 
   return (
     <main className="relative min-h-dvh">
       {/* Hidden element for playback (playsInline improves iOS; avoids some autoplay quirks). */}
       <audio ref={speakAudioRef} className="sr-only" preload="none" playsInline />
+      <audio ref={voiceAudioRef} className="sr-only" autoPlay playsInline />
       <div
         aria-hidden
         className="pointer-events-none absolute inset-0 -z-10 bg-[radial-gradient(ellipse_80%_50%_at_50%_-20%,rgba(120,119,198,0.12),transparent)] dark:bg-[radial-gradient(ellipse_80%_50%_at_50%_-20%,rgba(120,119,198,0.09),transparent)]"
@@ -1309,7 +1457,7 @@ export default function Home() {
       <div className="mx-auto flex max-w-6xl flex-col gap-8 px-4 py-12 sm:py-16">
         <div className="self-start px-6 py-4">
           <Image
-            src="/cadence-logo.png"
+            src="/cadence-logo.svg"
             alt="Cadence logo"
             width={140}
             height={44}
@@ -1382,6 +1530,40 @@ export default function Home() {
           </CardHeader>
 
           <CardContent className="space-y-10 pt-8">
+            <div className="border-border/80 bg-muted/30 flex flex-col gap-3 rounded-xl border p-3 sm:flex-row sm:items-center sm:justify-between">
+              <div className="min-w-0">
+                <p className="text-foreground text-sm font-medium">
+                  Voice check-in
+                </p>
+                {voiceStatusText ? (
+                  <p
+                    role={voiceError ? "alert" : "status"}
+                    aria-live="polite"
+                    className={cn(
+                      "mt-1 text-xs leading-relaxed",
+                      voiceError ? "text-destructive" : "text-muted-foreground",
+                    )}
+                  >
+                    {voiceStatusText}
+                  </p>
+                ) : null}
+              </div>
+              <Button
+                type="button"
+                variant={voiceBusy ? "secondary" : "outline"}
+                className="w-full sm:w-auto"
+                disabled={submitting && !voiceBusy}
+                onClick={() => void handleVoiceCheckIn()}
+              >
+                {voiceBusy ? (
+                  <MicOff aria-hidden className="size-4" />
+                ) : (
+                  <Mic aria-hidden className="size-4" />
+                )}
+                {voiceBusy ? "Stop check-in" : "Voice check-in"}
+              </Button>
+            </div>
+
             <section className="space-y-8" aria-labelledby="wellbeing-heading">
               <h2
                 id="wellbeing-heading"
@@ -1493,12 +1675,12 @@ export default function Home() {
                 type="button"
                 variant="outline"
                 className="w-full sm:w-auto"
-                disabled={morningBriefLoading}
+                disabled={morningBriefLoading || !plan}
                 onClick={() => void handleSendMorningBrief()}
               >
                 {morningBriefLoading
                   ? "Preparing brief..."
-                  : "Send Morning Brief"}
+                  : "Preview Morning Brief"}
               </Button>
               <Button
                 type="button"
@@ -1530,9 +1712,9 @@ export default function Home() {
             ) : null}
             {feedback.length > 0 ? (
               <p className="text-muted-foreground text-xs leading-relaxed">
-                {feedback.length} task
-                {feedback.length === 1 ? "" : "s"} marked as not suitable —
-                they&apos;ll be considered when generating the next plan.
+                {feedback.length} saved rating
+                {feedback.length === 1 ? "" : "s"} — they&apos;ll be considered
+                when generating the next plan.
               </p>
             ) : null}
             {planError ? (
@@ -1577,7 +1759,7 @@ export default function Home() {
                 {plan.schedule.map((item, index) => {
                   const accent = timelineAccent(item.type);
                   const key = feedbackKey(item.time, item.task);
-                  const isDownvoted = feedbackKeys.has(key);
+                  const isDownvoted = downvotedKeys.has(key);
                   const isUpvoted = upvotedKeys.has(key);
                   return (
                     <li
@@ -1714,25 +1896,10 @@ export default function Home() {
 
         <Card className="border-border/80 mx-auto w-full max-w-xl shadow-sm">
           <CardHeader className="border-border/70 border-b pb-4">
-            <div className="flex items-center justify-between gap-3">
-              <div>
-                <CardTitle className="text-lg">What I know about you</CardTitle>
-                <CardDescription>
-                  Built from your saved plans and schedule history.
-                </CardDescription>
-              </div>
-              {process.env.NODE_ENV === "development" ? (
-                <Button
-                  type="button"
-                  variant="outline"
-                  size="sm"
-                  disabled={seedingDemoData}
-                  onClick={() => void handleLoadDemoData()}
-                >
-                  {seedingDemoData ? "Loading..." : "Load demo data"}
-                </Button>
-              ) : null}
-            </div>
+            <CardTitle className="text-lg">What I know about you</CardTitle>
+            <CardDescription>
+              Built from plans stored privately in this browser.
+            </CardDescription>
           </CardHeader>
           <CardContent className="space-y-3 pt-6 text-sm">
             {insights === null ? (
@@ -1761,11 +1928,6 @@ export default function Home() {
                 </p>
               </>
             )}
-            {seedDemoDataError ? (
-              <p role="alert" className="text-destructive leading-relaxed">
-                {seedDemoDataError}
-              </p>
-            ) : null}
           </CardContent>
         </Card>
 
@@ -1777,7 +1939,7 @@ export default function Home() {
             </CardDescription>
           </CardHeader>
           <CardContent className="pt-6">
-            {recentPlans === undefined ? (
+            {localPlans === null ? (
               <p className="text-muted-foreground text-sm leading-relaxed">
                 Loading history…
               </p>
@@ -1789,11 +1951,11 @@ export default function Home() {
             ) : (
               <ul className="space-y-3" aria-label="Plan history">
                 {historyCards.map((p) => {
-                  const expanded = expandedHistoryId === p._id;
+                  const expanded = expandedHistoryId === p.id;
                   const summary = `Sleep: ${p.sleep}, ${cycleDisplayLabel(p.cyclePhase)}`;
                   const taskCount = p.schedule.length;
                   return (
-                    <li key={p._id} className="list-none">
+                    <li key={p.id} className="list-none">
                       <button
                         type="button"
                         aria-expanded={expanded}
@@ -1802,7 +1964,7 @@ export default function Home() {
                           expanded && "bg-muted/30 border-border",
                         )}
                         onClick={() =>
-                          setExpandedHistoryId(expanded ? null : p._id)
+                          setExpandedHistoryId(expanded ? null : p.id)
                         }
                       >
                         <div className="flex w-full items-start justify-between gap-3">
@@ -1837,7 +1999,7 @@ export default function Home() {
                               const accent = timelineAccent(item.type);
                               return (
                                 <li
-                                  key={`${p._id}-${item.time}-${index}`}
+                                  key={`${p.id}-${item.time}-${index}`}
                                   className={cn(
                                     "flex gap-3 overflow-hidden rounded-xl border py-3 pr-4 pl-0",
                                     accent.surface,
@@ -1918,8 +2080,8 @@ export default function Home() {
                   {morningBriefSubject}
                 </h2>
                 <p className="text-muted-foreground mt-2 text-sm">
-                  In production, this sends automatically at 6 AM via Convex
-                  cron.
+                  This is a privacy-safe preview. No email is sent from the
+                  public portfolio demo.
                 </p>
               </div>
               <Button

@@ -1,6 +1,6 @@
 import { v } from "convex/values";
 
-import { mutation, query } from "./_generated/server";
+import { internalMutation, internalQuery } from "./_generated/server";
 
 const scheduleItemValidator = v.object({
   time: v.string(),
@@ -15,7 +15,8 @@ const feedbackItemValidator = v.object({
   rating: v.number(),
 });
 
-export const savePlan = mutation({
+/** Prototype-only storage. The public no-login demo keeps personal plans in-browser. */
+export const savePlan = internalMutation({
   args: {
     createdAt: v.number(),
     sleep: v.number(),
@@ -42,7 +43,7 @@ export const savePlan = mutation({
   },
 });
 
-export const getRecentPlans = query({
+export const getRecentPlans = internalQuery({
   args: {},
   handler: async (ctx) => {
     return await ctx.db
@@ -53,17 +54,6 @@ export const getRecentPlans = query({
   },
 });
 
-export const getAllPlans = query({
-  args: {},
-  handler: async (ctx) => {
-    return await ctx.db
-      .query("plans")
-      .withIndex("by_createdAt", (q) => q.gte("createdAt", 0))
-      .order("desc")
-      .collect();
-  },
-});
-
 function toLocalTimestampDaysAgo(daysAgo: number, hour: number, minute = 0): number {
   const d = new Date();
   d.setHours(hour, minute, 0, 0);
@@ -71,7 +61,7 @@ function toLocalTimestampDaysAgo(daysAgo: number, hour: number, minute = 0): num
   return d.getTime();
 }
 
-export const seedDemoData = mutation({
+export const seedDemoData = internalMutation({
   args: {},
   handler: async (ctx) => {
     const demoPlans = [
